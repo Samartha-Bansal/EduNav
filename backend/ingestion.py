@@ -1,85 +1,128 @@
-from llama_index.core import SimpleDirectoryReader, Document
-from pathlib import Path
-import os
-import json
-from dotenv import load_dotenv
+"""Load documents from JSONL corpus and uploaded files."""
 
-# Load environment variables
+import json
+import re
+from pathlib import Path
+
+from dotenv import load_dotenv
+from llama_index.core import Document
+from pypdf import PdfReader
+
 load_dotenv()
 
-def tag_document(content: str, llm) -> list:
-    """
-    Use LLM to assign semantic tags to document content.
-    """
-    prompt = f"""
-    Analyze the following document content and assign relevant tags from this list:
-    admissions, curriculum, scholarships, internships, placements, fees, requirements, courses, technologies, careers
 
-    Return only the tags as a comma-separated list.
+def _guess_document_type(filename: str, text: str) -> str:
+    name = filename.lower()
+    if any(k in name for k in ("curriculum", "syllabus", "course")):
+        return "curriculum"
+    if any(k in name for k in ("admission", "fee", "apply")):
+        return "admission"
+    if any(k in name for k in ("placement", "report", "career")):
+        return "placement"
+    if any(k in name for k in ("student", "ug", "pgp", "tbm")):
+        return "program"
+    sample = text[:2000].lower()
+    if re.search(r"\b(curriculum|syllabus|courses? offered|programme structure)\b", sample):
+        return "curriculum"
+    if re.search(r"\b(admission|eligibility|application|fees?)\b", sample):
+        return "admission"
+    return "general"
 
-    Content: {content[:1000]}...  # First 1000 chars
-    """
-    response = llm.complete(prompt).text.strip()
-    tags = [tag.strip() for tag in response.split(',') if tag.strip()]
-    return tags
 
-def load_documents_from_jsonl(jsonl_file: str = "final_rag_input.jsonl"):
-    """
-    Load documents from JSONL file with semantic tagging.
-    Each line should be a JSON object with 'source' and 'text' fields.
-    """
+def load_documents_from_jsonl(jsonl_file: str = "final_rag_input.jsonl") -> list[Document]:
     documents = []
-    
-    with open(jsonl_file, 'r', encoding='utf-8') as f:
+    path = Path(jsonl_file)
+    if not path.exists():
+        return documents
+
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            if line.strip():
-                data = json.loads(line.strip())
-                source = data.get('source', 'Unknown')
-                text = data.get('text', '')
-                
-                # Create Document object
-                doc = Document(
+            if not line.strip():
+                continue
+            data = json.loads(line.strip())
+            source = data.get("source", "Unknown")
+            text = (data.get("text") or "").strip()
+            if len(text) < 30:
+                continue
+            documents.append(
+                Document(
                     text=text,
                     metadata={
-                        'file_name': source,
-                        'source': source
-                    }
+                        "file_name": source,
+                        "source": source,
+                        "document_type": _guess_document_type(source, text),
+                    },
                 )
-                documents.append(doc)
-    
-    # Add semantic tags
-    # from gemini_llm import GeminiLLM
-    # llm = GeminiLLM(model_name=os.getenv("LLM_MODEL", "gemini-3-flash-preview"), temperature=0.1)
-    # for doc in documents:
-    #     tags = tag_document(doc.text, llm)
-    #     doc.metadata['tags'] = tags
-    
+            )
     return documents
 
-def load_documents(data_dir: str = "data"):
-    """
-    Load documents from the data directory with semantic tagging.
-    Supports text and PDF files.
-    """
+
+def _read_pdf(path: Path) -> str:
+    reader = PdfReader(str(path))
+    pages = []
+    for page in reader.pages:
+        extracted = (page.extract_text() or "").strip()
+        if extracted:
+            pages.append(extracted)
+    return "\n\n".join(pages)
+
+
+def load_documents(data_dir: str = "data") -> list[Document]:
     data_path = Path(data_dir)
     if not data_path.exists():
-        raise ValueError(f"Data directory {data_dir} does not exist")
+        return []
 
-    reader = SimpleDirectoryReader(
-        input_dir=data_path,
-        required_exts=[".txt", ".pdf"],
-        recursive=True
-    )
-    documents = reader.load_data()
+    documents = []
+    for path in sorted(data_path.rglob("*")):
+        if path.is_dir():
+            continue
 
-    # Add semantic tags
-    llm = GeminiLLM(model_name=os.getenv("LLM_MODEL", "gemini-3-flash-preview"), temperature=0.1)
-    for doc in documents:
-        tags = tag_document(doc.text, llm)
-        doc.metadata['tags'] = tags
+        text = None
+        suffix = path.suffix.lower()
+        if suffix in {".txt", ".md"}:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = path.read_text(encoding="latin-1")
+        elif suffix == ".pdf":
+            try:
+                text = _read_pdf(path)
+            except Exception as exc:
+                print(f"Warning: could not read PDF {path.name}: {exc}")
+                continue
 
+        text = (text or "").strip()
+        if len(text) < 30:
+            print(f"Warning: skipping empty or tiny file {path.name}")
+            continue
+
+        doc_type = _guess_document_type(path.name, text)
+        documents.append(
+            Document(
+                text=text,
+                metadata={
+                    "file_name": path.name,
+                    "source": str(path),
+                    "document_type": doc_type,
+                },
+            )
+        )
     return documents
 
-if __name__ == "__main__":
-    docs = load_documents()
-    print(f"Loaded {len(docs)} documents")
+
+def load_all_documents(
+    jsonl_file: str = "final_rag_input.jsonl",
+    data_dir: str = "data",
+) -> list[Document]:
+    """Merge built-in corpus with user uploads in data/."""
+    documents = load_documents_from_jsonl(jsonl_file)
+    uploads = load_documents(data_dir)
+
+    seen = {d.metadata.get("file_name") for d in documents}
+    for doc in uploads:
+        name = doc.metadata.get("file_name")
+        if name not in seen:
+            documents.append(doc)
+            seen.add(name)
+
+    return documents

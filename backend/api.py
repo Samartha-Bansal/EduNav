@@ -1,21 +1,92 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from pydantic import BaseModel
-from pathlib import Path
-import os
+"""FastAPI server for EduNavigator RAG."""
+
 import json
+import logging
+import os
+import re
+import socket
+from contextlib import asynccontextmanager
 from datetime import datetime
-from query_engine import query_with_sources, create_query_engine
+from difflib import get_close_matches
+from pathlib import Path
+
 from dotenv import load_dotenv
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-# Load environment variables
+import build_index
+from query_engine import create_query_engine, query_with_sources
+
 load_dotenv()
+load_dotenv(".env.local", override=True)
 
-app = FastAPI(title="EduNavigator Course Assistant", version="3.0.0")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+HOST = os.getenv("HOST", "127.0.0.1")
+PORT = int(os.getenv("PORT", "8001"))
+STORAGE_DIR = os.getenv("STORAGE_DIR", "storage")
+
+
+class AppState:
+    query_engine = None
+    llm = None
+    init_error: str | None = None
+
+
+app_state = AppState()
+
+
+def get_query_engine():
+    if app_state.query_engine is None or app_state.llm is None:
+        app_state.query_engine, app_state.llm = create_query_engine(storage_dir=STORAGE_DIR)
+        app_state.init_error = None
+    return app_state.query_engine, app_state.llm
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        get_query_engine()
+        logger.info("Query engine ready")
+    except Exception as exc:
+        app_state.init_error = str(exc)
+        logger.warning("Startup init deferred: %s", exc)
+    yield
+
+
+app = FastAPI(title="EduNavigator Course Assistant", version="4.0.1", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def read_recent_logs(limit: int = 50):
+    log_file = Path("logs") / "query_logs.json"
+    if not log_file.exists():
+        return []
+    logs = []
+    with open(log_file, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                try:
+                    logs.append(json.loads(line.strip()))
+                except json.JSONDecodeError:
+                    continue
+    return logs[-limit:]
+
 
 class QuestionRequest(BaseModel):
     question: str
-    conversation_id: str = None
-    filters: dict = None
+    conversation_id: str | None = None
+    filters: dict | None = None
+
 
 class AnswerResponse(BaseModel):
     answer: str
@@ -23,173 +94,145 @@ class AnswerResponse(BaseModel):
     query_type: str
     retrieved_chunks: int
     highlighted_chunks: list[str]
-    reflection: dict = None
 
-# Mock responses for testing
-MOCK_RESPONSES = {
-    "courses": {
-        "answer": "We offer several courses including Computer Science, Data Science, and AI/ML programs. Our flagship courses are:\n\n1. **Computer Science Fundamentals** - Covers programming, algorithms, and software engineering\n2. **Data Science & Analytics** - Focuses on data analysis, machine learning, and visualization\n3. **Artificial Intelligence** - Advanced AI concepts including deep learning and neural networks\n\nEach course includes hands-on projects and industry-relevant skills.",
-        "sources": ["course_catalog.pdf", "program_overview.pdf"],
-        "query_type": "informational",
-        "retrieved_chunks": 5,
-        "highlighted_chunks": [
-            "Computer Science Fundamentals covers core programming concepts",
-            "Data Science program includes machine learning algorithms",
-            "AI course features deep learning and neural networks"
-        ]
-    },
-    "admission": {
-        "answer": "Admission requirements vary by program, but generally include:\n\n- Bachelor's degree in relevant field\n- Minimum GPA of 3.0\n- GRE/GMAT scores (waived for some programs)\n- Two letters of recommendation\n- Statement of purpose\n\nInternational students need TOEFL/IELTS scores. Applications are reviewed holistically.",
-        "sources": ["admissions_guide.pdf", "requirements.pdf"],
-        "query_type": "informational",
-        "retrieved_chunks": 3,
-        "highlighted_chunks": [
-            "Minimum GPA requirement is 3.0",
-            "GRE scores are required for most programs",
-            "International students need English proficiency tests"
-        ]
-    },
-    "fees": {
-        "answer": "Tuition fees for our programs:\n\n- **Computer Science**: $45,000/year\n- **Data Science**: $42,000/year\n- **AI/ML**: $48,000/year\n\nAdditional costs include:\n- Books and materials: $1,500\n- Health insurance: $2,500\n- Living expenses: $15,000\n\nFinancial aid and scholarships are available for eligible students.",
-        "sources": ["tuition_fees.pdf", "financial_aid.pdf"],
-        "query_type": "informational",
-        "retrieved_chunks": 4,
-        "highlighted_chunks": [
-            "CS program tuition is $45,000 per year",
-            "Financial aid available for qualified students",
-            "Additional costs include books and insurance"
-        ]
-    }
+
+COMMON_KEYWORDS = [
+    "founder", "global", "immersion", "placement", "admission", "application",
+    "fee", "tuition", "faculty", "entrepreneurship", "startup", "campus",
+    "program", "course", "career", "salary", "location",
+]
+
+SPELLING_REPLACEMENTS = {
+    "foundr": "founder",
+    "entreprenuer": "entrepreneurship",
+    "immerison": "immersion",
+    "globel": "global",
+    "placemant": "placement",
+    "admisison": "admission",
+    "applicaton": "application",
+    "tution": "tuition",
+    "fakulty": "faculty",
+    "stertup": "startup",
 }
 
-def get_mock_response(question: str) -> AnswerResponse:
-    """Return mock response based on question keywords"""
-    question_lower = question.lower()
 
-    if any(word in question_lower for word in ["course", "program", "curriculum", "subjects"]):
-        return AnswerResponse(**MOCK_RESPONSES["courses"])
-    elif any(word in question_lower for word in ["admission", "apply", "requirement", "eligible"]):
-        return AnswerResponse(**MOCK_RESPONSES["admission"])
-    elif any(word in question_lower for word in ["fee", "cost", "tuition", "price", "pay"]):
-        return AnswerResponse(**MOCK_RESPONSES["fees"])
-    else:
-        return AnswerResponse(
-            answer="I'd be happy to help you with information about our educational programs. Could you please specify what you're looking for? I can provide details about courses, admissions, fees, or other program information.",
-            sources=["general_info.pdf"],
-            query_type="general",
-            retrieved_chunks=2,
-            highlighted_chunks=["General program information available"]
-        )
+def normalize_question(question: str) -> str:
+    words = re.findall(r"\w+", question.lower())
+    normalized = []
+    for word in words:
+        if word in SPELLING_REPLACEMENTS:
+            normalized.append(SPELLING_REPLACEMENTS[word])
+            continue
+        close = get_close_matches(word, COMMON_KEYWORDS, n=1, cutoff=0.8)
+        normalized.append(close[0] if close else word)
+    return " ".join(normalized)
+
 
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
-    """Answer questions about educational programs"""
+    normalized_question = normalize_question(request.question)
     try:
-        # Create query engine
-        engine, llm = create_query_engine()
-        
-        # Query with self-reflection
-        answer, sources, query_type, retrieved_chunks, highlighted_chunks, reflection = query_with_sources(
-            request.question, engine, llm, request.filters, request.conversation_id
+        query_engine, llm = get_query_engine()
+        answer, sources, query_type, retrieved_chunks, highlighted_chunks, _ = query_with_sources(
+            normalized_question,
+            query_engine,
+            llm,
+            filters=request.filters,
+            conversation_id=request.conversation_id,
         )
-        
+        if not answer or not answer.strip():
+            raise ValueError("No answer generated from indexed documents.")
         return AnswerResponse(
             answer=answer,
             sources=sources,
             query_type=query_type,
             retrieved_chunks=retrieved_chunks,
             highlighted_chunks=highlighted_chunks,
-            reflection=reflection
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+    except Exception as exc:
+        logger.exception("Failed to answer question")
+        raise HTTPException(status_code=500, detail=f"Backend error: {exc}")
 
-@app.post("/upload")
+
+@app.post("/upload_documents")
 async def upload_documents(files: list[UploadFile] = File(...)):
-    """Upload documents to the knowledge base"""
-    uploaded_files = []
+    data_dir = Path("data")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    uploaded = []
     for file in files:
-        # Save file
-        file_path = Path("data") / file.filename
-        file_path.parent.mkdir(exist_ok=True)
+        if not file.filename:
+            continue
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".txt", ".pdf", ".md"}:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+        path = data_dir / file.filename
+        path.write_bytes(await file.read())
+        uploaded.append(file.filename)
+    return {"message": f"Uploaded {len(uploaded)} file(s)", "files": uploaded}
 
-        with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-
-        uploaded_files.append(file.filename)
-
-    return {"message": f"Uploaded {len(uploaded_files)} files", "files": uploaded_files}
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    index_ready = Path(STORAGE_DIR).is_dir() and any(Path(STORAGE_DIR).iterdir())
+    llm_configured = bool(os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY"))
+    return {
+        "status": "healthy" if index_ready and llm_configured else "degraded",
+        "index_ready": index_ready,
+        "llm_configured": llm_configured,
+        "engine_ready": app_state.query_engine is not None,
+        "init_error": app_state.init_error,
+        "timestamp": datetime.now().isoformat(),
+    }
 
-@app.get("/logs")
-async def get_logs():
-    """Get system logs"""
-    return {"logs": ["System initialized", "Mock responses active"]}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-@app.post("/upload_document")
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload a new document to the data directory.
-    """
-    try:
-        data_dir = Path("data")
-        data_dir.mkdir(exist_ok=True)
-        file_path = data_dir / file.filename
-        with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        return {"message": f"Document {file.filename} uploaded successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/rebuild_index")
-async def rebuild_index():
-    """
-    Rebuild the vector index with new documents.
-    """
-    try:
-        # Run rebuild in background
-        import subprocess
-        subprocess.Popen(["python", "build_index.py"])
-        return {"message": "Index rebuild started"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def rebuild_index_endpoint(background_tasks: BackgroundTasks):
+    def _rebuild():
+        build_index.build_and_persist_index(storage_dir=STORAGE_DIR)
+        app_state.query_engine = None
+        app_state.llm = None
+        try:
+            get_query_engine()
+            logger.info("Index rebuilt and query engine reloaded")
+        except Exception as exc:
+            app_state.init_error = str(exc)
+            logger.exception("Failed to reload engine after rebuild")
+
+    background_tasks.add_task(_rebuild)
+    return {"message": "Index rebuild started. Ask questions again in a minute."}
+
+
+@app.get("/documents")
+async def list_documents():
+    data_dir = Path("data")
+    if not data_dir.exists():
+        return {"documents": []}
+    docs = [p.name for p in sorted(data_dir.iterdir()) if p.is_file()]
+    return {"documents": docs}
+
 
 @app.get("/logs")
 async def get_logs():
-    """
-    Get recent query logs.
-    """
-    try:
-        logs = []
-        with open("logs/query_logs.json", "r") as f:
-            for line in f:
-                logs.append(json.loads(line.strip()))
-        return {"logs": logs[-50:]}  # Last 50 logs
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"logs": read_recent_logs()}
 
-@app.get("/evaluation")
-async def get_evaluation():
-    """
-    Get evaluation results.
-    """
-    try:
-        with open("logs/evaluation_results.json", "r") as f:
-            results = json.load(f)
-        return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+def port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex((host, port)) == 0
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    if port_in_use(HOST, PORT):
+        logger.error(
+            "Port %s is already in use. Stop the other process first:\n"
+            "  netstat -ano | findstr :%s\n"
+            "  taskkill /PID <pid> /F\n"
+            "Or use: ..\\scripts\\start-backend.ps1",
+            PORT,
+            PORT,
+        )
+        raise SystemExit(1)
+
+    uvicorn.run(app, host=HOST, port=PORT)

@@ -14,7 +14,7 @@ class GeminiLLM(LLM):
     Custom LLM class for Google Gemini integration with LlamaIndex using the new google.genai SDK
     """
 
-    model_name: str = "gemini-3-flash-preview"
+    model_name: str = "gemini-2.0-flash"
     temperature: float = 0.1
     max_tokens: Optional[int] = None
     client: Optional[Any] = None

@@ -1,119 +1,95 @@
-from gpt4all import GPT4All
-from llama_index.core.llms import LLM, CompletionResponse, CompletionResponseGen
-from llama_index.core.llms import ChatMessage, MessageRole
-from typing import Any, List, Optional, AsyncGenerator
-import os
-from dotenv import load_dotenv
-import asyncio
-from llama_index.core.llms import LLMMetadata
+"""Groq API integration for LlamaIndex."""
 
-# Load environment variables
+import asyncio
+import os
+from typing import Any, AsyncGenerator, List, Optional
+
+from dotenv import load_dotenv
+from groq import Groq
+from llama_index.core.llms import (
+    ChatMessage,
+    CompletionResponse,
+    CompletionResponseGen,
+    LLM,
+    LLMMetadata,
+    MessageRole,
+)
+
 load_dotenv()
 
-class GPT4AllLLM(LLM):
-    """
-    Custom LLM class for GPT4All integration with LlamaIndex
-    """
 
-    model_name: str = "gpt4all-mini"
-    temperature: float = 0.1
-    max_tokens: Optional[int] = None
-    model: Optional[Any] = None
+class GroqLLM(LLM):
+    model_name: str = "llama-3.1-8b-instant"
+    temperature: float = 0.05
+    max_tokens: Optional[int] = 2048
+    _client: Optional[Groq] = None
 
-    def __init__(self, model_name: str = "gpt4all-mini", temperature: float = 0.1, max_tokens: Optional[int] = None):
+    def __init__(
+        self,
+        model_name: str = "llama-3.1-8b-instant",
+        temperature: float = 0.05,
+        max_tokens: Optional[int] = 2048,
+        api_key: Optional[str] = None,
+    ):
         super().__init__()
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
-
-        # Initialize the GPT4All model
-        # GPT4All will automatically download the model if not present
-        try:
-            self.model = GPT4All(model_name, device='cpu')  # Use CPU for compatibility
-        except Exception as e:
-            raise ValueError(f"Failed to load GPT4All model '{model_name}': {str(e)}")
+        key = api_key or os.getenv("GROQ_API_KEY")
+        if not key:
+            raise ValueError("GROQ_API_KEY is required")
+        self._client = Groq(api_key=key)
 
     @property
     def metadata(self) -> LLMMetadata:
         return LLMMetadata(
-            context_window=2048,  # GPT4All-Mini has smaller context window
-            num_output=256,
-            model_name=self.model_name
+            context_window=8192,
+            num_output=self.max_tokens or 1024,
+            model_name=self.model_name,
         )
 
     def generate(self, prompt: str) -> str:
-        """
-        Generate a response from the prompt using GPT4All.
-        Returns the text response directly.
-        """
-        try:
-            # GPT4All generate method
-            response = self.model.generate(
-                prompt,
-                max_tokens=self.max_tokens or 256,
-                temp=self.temperature
-            )
-            return response
-        except Exception as e:
-            raise Exception(f"GPT4All error: {str(e)}")
+        response = self._client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens or 1024,
+        )
+        return response.choices[0].message.content or ""
 
     def complete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
-        """Complete a prompt using GPT4All (LlamaIndex compatibility)"""
-        try:
-            text = self.generate(prompt)
-            return CompletionResponse(text=text)
-        except Exception as e:
-            raise Exception(f"GPT4All error: {str(e)}")
+        return CompletionResponse(text=self.generate(prompt))
 
     async def acomplete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
-        """Async complete a prompt using GPT4All"""
-        # For simplicity, run sync method in thread pool
         loop = asyncio.get_event_loop()
         text = await loop.run_in_executor(None, self.generate, prompt)
         return CompletionResponse(text=text)
 
     def stream_complete(self, prompt: str, **kwargs: Any) -> CompletionResponseGen:
-        """Streaming completion (not implemented for simplicity)"""
-        response = self.complete(prompt, **kwargs)
-        yield response
+        yield self.complete(prompt, **kwargs)
 
     async def astream_complete(self, prompt: str, **kwargs: Any) -> AsyncGenerator[CompletionResponse, None]:
-        """Async streaming completion"""
-        response = await self.acomplete(prompt, **kwargs)
-        yield response
+        yield await self.acomplete(prompt, **kwargs)
 
     def chat(self, messages: List[ChatMessage], **kwargs: Any) -> CompletionResponse:
-        """Chat completion using GPT4All"""
-        try:
-            # Convert LlamaIndex messages to a single prompt
-            # GPT4All doesn't have native chat format, so we'll concatenate
-            prompt_parts = []
-            for message in messages:
-                role = "User" if message.role == MessageRole.USER else "Assistant"
-                prompt_parts.append(f"{role}: {message.content}")
-
-            # Join with newlines and add final instruction
-            full_prompt = "\n".join(prompt_parts) + "\nAssistant:"
-
-            response = self.generate(full_prompt)
-            return CompletionResponse(text=response)
-
-        except Exception as e:
-            raise Exception(f"GPT4All error: {str(e)}")
+        groq_messages = []
+        for message in messages:
+            role = "user" if message.role == MessageRole.USER else "assistant"
+            groq_messages.append({"role": role, "content": message.content})
+        response = self._client.chat.completions.create(
+            model=self.model_name,
+            messages=groq_messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens or 1024,
+        )
+        return CompletionResponse(text=response.choices[0].message.content or "")
 
     async def achat(self, messages: List[ChatMessage], **kwargs: Any) -> CompletionResponse:
-        """Async chat completion using GPT4All"""
-        # For simplicity, run sync method in thread pool
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, self.chat, messages)
-        return result
+        return await loop.run_in_executor(None, lambda: self.chat(messages, **kwargs))
 
     def stream_chat(self, messages: List[ChatMessage], **kwargs: Any) -> CompletionResponseGen:
-        """Streaming chat (not implemented for simplicity)"""
-        response = self.chat(messages, **kwargs)
-        yield response
+        yield self.chat(messages, **kwargs)
 
     async def astream_chat(self, messages: List[ChatMessage], **kwargs: Any) -> AsyncGenerator[CompletionResponse, None]:
-        """Async streaming chat"""
-        response = await self.achat(messages, **kwargs)
-        yield response
+        yield await self.achat(messages, **kwargs)

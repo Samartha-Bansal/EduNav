@@ -1,12 +1,15 @@
-import { useState, useRef, KeyboardEvent } from 'react'
-import { Send } from 'lucide-react'
+'use client'
+
+import { useState, useRef, ChangeEvent, KeyboardEvent } from 'react'
+import { ArrowUp } from 'lucide-react'
 
 interface MessageInputProps {
   onSendMessage: (message: string) => void
   disabled?: boolean
+  placeholder?: string
 }
 
-export default function MessageInput({ onSendMessage, disabled }: MessageInputProps) {
+export default function MessageInput({ onSendMessage, disabled, placeholder }: MessageInputProps) {
   const [message, setMessage] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -14,49 +17,48 @@ export default function MessageInput({ onSendMessage, disabled }: MessageInputPr
     if (message.trim() && !disabled) {
       onSendMessage(message.trim())
       setMessage('')
-      // Reset textarea height
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
       }
     }
   }
 
-  const handleKeyPress = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSubmit()
     }
   }
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleInputChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     setMessage(e.target.value)
-
-    // Auto-resize textarea
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`
     }
   }
 
   return (
-    <div className="relative">
+    <div className="relative rounded-2xl bg-white shadow-input ring-1 ring-zinc-200/90 transition-shadow focus-within:shadow-[0_0_0_3px_rgba(37,99,235,0.12)] focus-within:ring-brand-500/40 dark:bg-zinc-900 dark:shadow-input-dark dark:ring-zinc-700 dark:focus-within:shadow-[0_0_0_3px_rgba(59,130,246,0.15)] dark:focus-within:ring-brand-500/30">
       <textarea
         ref={textareaRef}
         value={message}
         onChange={handleInputChange}
-        onKeyPress={handleKeyPress}
-        placeholder="Ask me anything about courses, admissions, fees..."
-        className="w-full resize-none rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 px-4 py-3 pl-12 pr-12 text-slate-900 dark:text-slate-100 placeholder-slate-500 dark:placeholder-slate-400 focus:border-blue-500 dark:focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:focus:ring-blue-400/20 min-h-[48px] max-h-32 shadow-sm"
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder ?? 'Ask a question…'}
+        className="w-full resize-none bg-transparent px-4 py-3.5 pr-14 text-[15px] font-medium leading-relaxed text-zinc-900 placeholder:font-normal placeholder:text-zinc-400 focus:outline-none min-h-[52px] max-h-40 dark:text-zinc-100 dark:placeholder:text-zinc-500"
         rows={1}
         disabled={disabled}
+        aria-label="Message"
       />
-
       <button
+        type="button"
         onClick={handleSubmit}
         disabled={!message.trim() || disabled}
-        className="absolute right-3 top-1/2 transform -translate-y-1/2 p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 disabled:text-slate-300 dark:disabled:text-slate-600 disabled:cursor-not-allowed transition-colors"
+        aria-label="Send message"
+        className="absolute bottom-2.5 right-2.5 flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600 text-white transition hover:bg-brand-700 disabled:bg-zinc-200 disabled:text-zinc-400 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-500"
       >
-        <Send size={18} />
+        <ArrowUp size={18} strokeWidth={2.5} />
       </button>
     </div>
   )

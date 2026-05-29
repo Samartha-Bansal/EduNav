@@ -1,30 +1,12 @@
-import { useEffect, useState } from 'react'
-
-interface LoadingIndicatorProps {
-  message?: string
-}
-
-export default function LoadingIndicator({ message = "Thinking..." }: LoadingIndicatorProps) {
-  const [dots, setDots] = useState('')
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setDots(prev => prev.length >= 3 ? '' : prev + '.')
-    }, 500)
-
-    return () => clearInterval(interval)
-  }, [])
-
+export default function LoadingIndicator() {
   return (
-    <div className="flex items-center gap-3 py-4">
-      <div className="flex items-center gap-1">
-        <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-        <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-        <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
+    <div className="flex items-center gap-3 py-1 pl-12">
+      <div className="flex gap-1">
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-500 [animation-delay:-0.3s] dark:bg-brand-400" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-400 [animation-delay:-0.15s] dark:bg-brand-500" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-300 dark:bg-brand-600" />
       </div>
-      <span className="text-slate-600 dark:text-slate-400 text-sm">
-        {message}{dots}
-      </span>
+      <span className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Preparing your answer…</span>
     </div>
   )
 }
