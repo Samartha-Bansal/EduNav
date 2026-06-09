@@ -1,5 +1,6 @@
 """FastAPI server for EduNavigator RAG."""
 
+import asyncio
 import json
 import logging
 import os
@@ -82,9 +83,16 @@ def read_recent_logs(limit: int = 50):
     return logs[-limit:]
 
 
+class ChatTurn(BaseModel):
+    question: str
+    answer: str
+
+
 class QuestionRequest(BaseModel):
     question: str
     conversation_id: str | None = None
+    client_id: str | None = None
+    history: list[ChatTurn] | None = None
     filters: dict | None = None
 
 
@@ -133,12 +141,18 @@ async def ask_question(request: QuestionRequest):
     normalized_question = normalize_question(request.question)
     try:
         query_engine, llm = get_query_engine()
-        answer, sources, query_type, retrieved_chunks, highlighted_chunks, _ = query_with_sources(
+        history = (
+            [turn.model_dump() for turn in request.history] if request.history else None
+        )
+        answer, sources, query_type, retrieved_chunks, highlighted_chunks, _ = await asyncio.to_thread(
+            query_with_sources,
             normalized_question,
             query_engine,
             llm,
-            filters=request.filters,
-            conversation_id=request.conversation_id,
+            request.filters,
+            request.conversation_id,
+            request.client_id,
+            history,
         )
         if not answer or not answer.strip():
             raise ValueError("No answer generated from indexed documents.")

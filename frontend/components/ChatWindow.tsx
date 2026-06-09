@@ -7,15 +7,42 @@ import MessageInput from './MessageInput'
 import LoadingIndicator from './LoadingIndicator'
 import ThemeToggle from './ThemeToggle'
 import { sendMessage, ChatResponse, fetchHealth } from '../lib/api'
+import {
+  buildChatHistory,
+  CONVERSATIONS_STORAGE_KEY,
+  conversationsToPersist,
+  createEmptyConversation,
+  hasCompletedExchange,
+  loadSavedConversations,
+  StoredConversation,
+  StoredMessage,
+} from '../lib/conversations'
+import { getDeviceId } from '../lib/device'
 
-interface Message {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  sources?: string[]
-  queryType?: string
-  highlightedChunks?: string[]
+interface Message extends Omit<StoredMessage, 'timestamp'> {
   timestamp: Date
+}
+
+function toStoredMessage(message: Message): StoredMessage {
+  return { ...message, timestamp: message.timestamp.toISOString() }
+}
+
+function fromStoredMessage(message: StoredMessage): Message {
+  return { ...message, timestamp: new Date(message.timestamp) }
+}
+
+function fromStoredConversation(conv: StoredConversation): Conversation {
+  return {
+    ...conv,
+    messages: conv.messages.map(fromStoredMessage),
+  }
+}
+
+function toStoredConversation(conv: Conversation): StoredConversation {
+  return {
+    ...conv,
+    messages: conv.messages.map(toStoredMessage),
+  }
 }
 
 interface Conversation {
@@ -25,8 +52,6 @@ interface Conversation {
   createdAt: string
 }
 
-const STORAGE_KEY = 'edunavigator_conversations'
-
 const SUGGESTED_QUESTIONS = [
   'What courses does Masters Union offer?',
   'What are the admission requirements?',
@@ -35,16 +60,21 @@ const SUGGESTED_QUESTIONS = [
 ]
 
 export default function ChatWindow() {
-  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [savedConversations, setSavedConversations] = useState<Conversation[]>([])
+  const [draftConversation, setDraftConversation] = useState<Conversation | null>(null)
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isInitialized, setIsInitialized] = useState(false)
   const [isOnline, setIsOnline] = useState<boolean | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  const activeConversation = conversations.find((conv) => conv.id === activeConversationId)
+  const activeConversation =
+    draftConversation?.id === activeConversationId
+      ? draftConversation
+      : savedConversations.find((conv) => conv.id === activeConversationId)
   const activeMessages = activeConversation?.messages ?? []
   const canChat = isOnline === true
+  const isDraftActive = draftConversation?.id === activeConversationId
 
   const checkHealth = useCallback(async () => {
     try {
@@ -56,36 +86,19 @@ export default function ChatWindow() {
   }, [])
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as Conversation[]
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setConversations(parsed)
-          setActiveConversationId(parsed[0].id)
-          setIsInitialized(true)
-          return
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    const first: Conversation = {
-      id: Date.now().toString(),
-      title: 'New conversation',
-      messages: [],
-      createdAt: new Date().toISOString(),
-    }
-    setConversations([first])
-    setActiveConversationId(first.id)
+    const saved = loadSavedConversations().map(fromStoredConversation)
+    const draft = fromStoredConversation(createEmptyConversation())
+    setSavedConversations(saved)
+    setDraftConversation(draft)
+    setActiveConversationId(draft.id)
     setIsInitialized(true)
   }, [])
 
   useEffect(() => {
     if (!isInitialized) return
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations))
-  }, [conversations, isInitialized])
+    const stored = conversationsToPersist(savedConversations.map(toStoredConversation))
+    window.localStorage.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(stored))
+  }, [savedConversations, isInitialized])
 
   useEffect(() => {
     checkHealth()
@@ -97,28 +110,79 @@ export default function ChatWindow() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [activeMessages.length, isLoading])
 
-  const createConversation = () => {
-    const newConversation: Conversation = {
-      id: Date.now().toString(),
-      title: 'New conversation',
-      messages: [],
-      createdAt: new Date().toISOString(),
+  const discardDraftIfUnused = () => {
+    if (
+      isDraftActive &&
+      !hasCompletedExchange(activeMessages.map(toStoredMessage))
+    ) {
+      setDraftConversation(fromStoredConversation(createEmptyConversation()))
     }
-    setConversations((prev) => [newConversation, ...prev])
-    setActiveConversationId(newConversation.id)
   }
 
-  const updateConversation = (conversationId: string, messages: Message[], title?: string) => {
-    setConversations((prev) =>
+  const selectConversation = (id: string) => {
+    if (id === activeConversationId) return
+    discardDraftIfUnused()
+    setActiveConversationId(id)
+  }
+
+  const startNewConversation = () => {
+    if (isDraftActive && activeMessages.length === 0) return
+    const fresh = fromStoredConversation(createEmptyConversation())
+    setDraftConversation(fresh)
+    setActiveConversationId(fresh.id)
+  }
+
+  const updateActiveConversation = (messages: Message[], title?: string) => {
+    if (!activeConversationId) return
+
+    if (draftConversation?.id === activeConversationId) {
+      setDraftConversation((prev) =>
+        prev
+          ? {
+              ...prev,
+              messages,
+              title: title ?? prev.title,
+            }
+          : prev,
+      )
+      return
+    }
+
+    setSavedConversations((prev) =>
       prev.map((conv) =>
-        conv.id === conversationId ? { ...conv, title: title ?? conv.title, messages } : conv,
+        conv.id === activeConversationId
+          ? { ...conv, messages, title: title ?? conv.title }
+          : conv,
       ),
     )
   }
 
-  const clearConversation = () => {
-    if (!activeConversationId) return
-    updateConversation(activeConversationId, [])
+  const promoteDraftIfComplete = (messages: Message[], title?: string) => {
+    if (!draftConversation || draftConversation.id !== activeConversationId) return
+    if (!hasCompletedExchange(messages.map(toStoredMessage))) return
+
+    const promoted: Conversation = {
+      ...draftConversation,
+      messages,
+      title:
+        title ??
+        (draftConversation.title === 'New conversation'
+          ? messages.find((m) => m.role === 'user')?.content.slice(0, 48) ?? draftConversation.title
+          : draftConversation.title),
+    }
+
+    setSavedConversations((prev) => [promoted, ...prev.filter((c) => c.id !== promoted.id)])
+    setDraftConversation(fromStoredConversation(createEmptyConversation()))
+  }
+
+  const deleteConversation = (id: string) => {
+    setSavedConversations((prev) => prev.filter((c) => c.id !== id))
+
+    if (activeConversationId === id) {
+      const fresh = fromStoredConversation(createEmptyConversation())
+      setDraftConversation(fresh)
+      setActiveConversationId(fresh.id)
+    }
   }
 
   const handleSendMessage = async (content: string) => {
@@ -137,12 +201,18 @@ export default function ChatWindow() {
         ? content.slice(0, 48)
         : activeConversation?.title
 
-    updateConversation(activeConversationId, updatedMessages, newTitle)
+    updateActiveConversation(updatedMessages, newTitle)
     setIsLoading(true)
 
     try {
-      const response: ChatResponse = await sendMessage(content, activeConversationId)
-      updateConversation(activeConversationId, [
+      const history = buildChatHistory(activeMessages.map(toStoredMessage))
+      const response: ChatResponse = await sendMessage(
+        content,
+        activeConversationId,
+        getDeviceId(),
+        history,
+      )
+      const withAssistant: Message[] = [
         ...updatedMessages,
         {
           id: (Date.now() + 1).toString(),
@@ -153,17 +223,25 @@ export default function ChatWindow() {
           highlightedChunks: response.highlighted_chunks,
           timestamp: new Date(),
         },
-      ])
-    } catch {
-      updateConversation(activeConversationId, [
+      ]
+      updateActiveConversation(withAssistant, newTitle)
+      promoteDraftIfComplete(withAssistant, newTitle)
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : 'I was unable to process your request. Please try again in a moment.'
+      const withError: Message[] = [
         ...updatedMessages,
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          content: 'I was unable to process your request. Please try again in a moment.',
+          content: errorMessage,
           timestamp: new Date(),
         },
-      ])
+      ]
+      updateActiveConversation(withError, newTitle)
+      promoteDraftIfComplete(withError, newTitle)
     } finally {
       setIsLoading(false)
     }
@@ -218,7 +296,7 @@ export default function ChatWindow() {
 
           <p className="mt-3 text-xs font-medium leading-relaxed text-zinc-500 dark:text-zinc-400">
             Your AI help desk for Masters&apos; Union — answers are retrieved from official program
-            documents, not guessed.
+            documents, not guessed. Chats are saved on this device only.
           </p>
 
           <div
@@ -234,7 +312,7 @@ export default function ChatWindow() {
             <span className="sidebar-label">Conversations</span>
             <button
               type="button"
-              onClick={createConversation}
+              onClick={startNewConversation}
               className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-brand-600 transition hover:bg-brand-50 dark:text-brand-400 dark:hover:bg-brand-950"
             >
               <MessageSquarePlus size={15} strokeWidth={2} />
@@ -243,32 +321,57 @@ export default function ChatWindow() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-3">
-            <div className="space-y-0.5">
-              {conversations.map((conversation) => {
-                const active = conversation.id === activeConversationId
-                return (
-                  <button
-                    key={conversation.id}
-                    type="button"
-                    onClick={() => setActiveConversationId(conversation.id)}
-                    className={`w-full rounded-xl px-3 py-2.5 text-left transition-colors ${
-                      active
-                        ? 'bg-brand-50 text-brand-900 dark:bg-brand-950 dark:text-brand-100'
-                        : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                    }`}
-                  >
-                    <div className="truncate text-[13px] font-semibold leading-snug">
-                      {conversation.title || 'New conversation'}
+            {savedConversations.length === 0 ? (
+              <p className="px-2 py-4 text-center text-xs font-medium text-zinc-400 dark:text-zinc-500">
+                No saved chats yet. Start typing to begin.
+              </p>
+            ) : (
+              <div className="space-y-0.5">
+                {savedConversations.map((conversation) => {
+                  const active = conversation.id === activeConversationId
+                  const preview =
+                    conversation.messages[conversation.messages.length - 1]?.content ?? ''
+                  return (
+                    <div
+                      key={conversation.id}
+                      className={`group flex items-stretch rounded-xl transition-colors ${
+                        active
+                          ? 'bg-brand-50 dark:bg-brand-950'
+                          : 'hover:bg-zinc-50 dark:hover:bg-zinc-800'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => selectConversation(conversation.id)}
+                        className={`min-w-0 flex-1 px-3 py-2.5 text-left ${
+                          active
+                            ? 'text-brand-900 dark:text-brand-100'
+                            : 'text-zinc-700 dark:text-zinc-300'
+                        }`}
+                      >
+                        <div className="truncate text-[13px] font-semibold leading-snug">
+                          {conversation.title || 'New conversation'}
+                        </div>
+                        <div className="mt-0.5 truncate text-xs font-medium text-zinc-400">
+                          {preview}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          deleteConversation(conversation.id)
+                        }}
+                        title="Delete conversation"
+                        className="mr-1.5 shrink-0 self-center rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-red-600 dark:hover:bg-zinc-700 dark:hover:text-red-400"
+                      >
+                        <Trash2 size={14} strokeWidth={2} />
+                      </button>
                     </div>
-                    <div className="mt-0.5 truncate text-xs font-medium text-zinc-400">
-                      {conversation.messages.length > 0
-                        ? conversation.messages[conversation.messages.length - 1].content
-                        : 'Start a conversation'}
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
         </div>
 
@@ -289,18 +392,6 @@ export default function ChatWindow() {
               <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">
                 Summaries from official Masters&apos; Union program documents
               </p>
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <ThemeToggle />
-              <button
-                type="button"
-                onClick={clearConversation}
-                disabled={activeMessages.length === 0}
-                title="Clear conversation"
-                className="btn-icon"
-              >
-                <Trash2 size={16} />
-              </button>
             </div>
           </div>
         </header>
@@ -375,7 +466,8 @@ export default function ChatWindow() {
           <div className="mx-auto max-w-3xl">
             <MessageInput
               onSendMessage={handleSendMessage}
-              disabled={isLoading || !canChat}
+              disabled={!canChat}
+              sending={isLoading}
               placeholder={
                 canChat
                   ? 'Ask about Masters\' Union programs, admissions, fees…'

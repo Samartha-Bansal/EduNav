@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { BookOpen, ChevronDown, ChevronUp, FileText, Sparkles } from 'lucide-react'
 import MessageContent from './MessageContent'
+import UserMessage from './UserMessage'
 
 interface Message {
   id: string
@@ -25,9 +26,7 @@ export default function ChatMessage({ message }: ChatMessageProps) {
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[88%] rounded-2xl rounded-br-md bg-brand-600 px-4 py-3 text-[15px] font-medium leading-relaxed text-white shadow-soft dark:bg-brand-500 sm:max-w-lg">
-          {message.content}
-        </div>
+        <UserMessage content={message.content} />
       </div>
     )
   }

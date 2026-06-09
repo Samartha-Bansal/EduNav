@@ -14,19 +14,41 @@ from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.schema import QueryBundle
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-from answer_generator import generate_answer, is_generic_answer
+from answer_generator import (
+    format_context,
+    generate_answer,
+    is_generic_answer,
+    is_not_answered_response,
+)
 from answer_validator import has_substantive_content, is_refusal
 from build_index import load_persisted_index
 from conversation_context import (
     combined_scope_text,
     extract_topic_hints,
     get_history,
+    memory_key,
     resolve_question,
 )
 from llm_factory import create_llm
 from query_classifier import QueryClassifier
 from query_expansion import build_retrieval_query
-from topic_guard import is_clearly_off_topic, should_refuse
+from answer_safety import (
+    answer_contains_outside_knowledge,
+    answer_dodges_instead_of_refusing,
+    sanitize_or_refuse,
+)
+from scope_classifier import (
+    evaluate_scope,
+    is_assistant_scoped_question,
+    is_world_knowledge_question,
+)
+from topic_guard import is_program_related, mentions_masters_union
+from topic_guard import (
+    REFUSAL_MESSAGE,
+    is_clearly_off_topic,
+    is_general_knowledge_question,
+    is_gibberish_or_spam,
+)
 
 load_dotenv()
 load_dotenv(".env.local", override=True)
@@ -43,6 +65,21 @@ MAX_HIGHLIGHTED_CHUNKS = int(os.getenv("MAX_HIGHLIGHTED_CHUNKS", "4"))
 conversation_memory: Dict[str, List[Dict]] = {}
 
 
+def _remember_turn(
+    question: str,
+    answer: str,
+    conversation_id: str | None,
+    client_id: str | None,
+) -> None:
+    key = memory_key(client_id, conversation_id)
+    if not key:
+        return
+    conversation_memory.setdefault(key, []).append(
+        {"question": question, "answer": answer, "timestamp": time.time()}
+    )
+    conversation_memory[key] = conversation_memory[key][-10:]
+
+
 def _refusal_response(
     question: str,
     conversation_id: str | None,
@@ -50,6 +87,7 @@ def _refusal_response(
     start_time: float,
     message: str | None = None,
     nodes: list | None = None,
+    client_id: str | None = None,
 ):
     from topic_guard import REFUSAL_MESSAGE
 
@@ -57,11 +95,7 @@ def _refusal_response(
     sources = []
     highlighted = []
 
-    if conversation_id:
-        conversation_memory.setdefault(conversation_id, []).append(
-            {"question": question, "answer": answer, "timestamp": time.time()}
-        )
-        conversation_memory[conversation_id] = conversation_memory[conversation_id][-10:]
+    _remember_turn(question, answer, conversation_id, client_id)
 
     log_query(
         {
@@ -166,60 +200,110 @@ def query_with_sources(
     llm,
     filters: dict = None,
     conversation_id: str = None,
+    client_id: str = None,
+    history: list = None,
 ):
     start_time = time.time()
-    history = get_history(conversation_memory, conversation_id)
-    scope_text = combined_scope_text(question, history)
+    chat_history = get_history(
+        conversation_memory,
+        conversation_id,
+        client_id=client_id,
+        request_history=history,
+    )
+    scope_text = combined_scope_text(question, chat_history)
 
-    if is_clearly_off_topic(question, scope_text):
-        return _refusal_response(question, conversation_id, "out_of_scope", start_time)
+    if is_clearly_off_topic(question, scope_text) or is_world_knowledge_question(
+        question, scope_text
+    ):
+        return _refusal_response(
+            question, conversation_id, "out_of_scope", start_time, client_id=client_id
+        )
 
     classifier = QueryClassifier()
     query_type = classifier.classify(question)
-    resolved_question = resolve_question(question, history)
+    resolved_question = resolve_question(question, chat_history)
 
     retriever = query_engine._retriever
     reranker = query_engine._node_postprocessors[0] if query_engine._node_postprocessors else None
     nodes, search_query = retrieve_with_retry(
-        retriever, reranker, question, query_type, history
+        retriever, reranker, question, query_type, chat_history
     )
 
-    # Never pre-emptively refuse on retrieval score — try to answer from best available chunks
-    refuse, refusal_msg = should_refuse(question, nodes, scope_text)
-    if refuse:
-        refusal_type = (
-            "not_found" if refusal_msg and "couldn't find" in refusal_msg.lower() else "out_of_scope"
-        )
+    should_answer, refusal_msg = evaluate_scope(question, nodes, scope_text)
+    if not should_answer:
         return _refusal_response(
-            question, conversation_id, refusal_type, start_time, refusal_msg, nodes
+            question,
+            conversation_id,
+            "out_of_scope",
+            start_time,
+            refusal_msg,
+            nodes,
+            client_id=client_id,
         )
 
     # LLM uses resolved question + optional short context note for pronouns
     llm_question = resolved_question
-    if history and resolved_question != question:
+    if chat_history and resolved_question != question:
         llm_question = f"{question}\n\n(Context: {resolved_question})"
 
-    answer = clean_answer_text(generate_answer(llm_question, nodes, llm))
+    context_str = format_context(nodes)
+    mu_program_question = (
+        is_assistant_scoped_question(question)
+        or is_program_related(question)
+        or mentions_masters_union(scope_text)
+    )
+    answer = clean_answer_text(
+        generate_answer(llm_question, nodes, llm, mu_program_question=mu_program_question)
+    )
+    off_topic = is_world_knowledge_question(question, scope_text) or is_general_knowledge_question(
+        question, scope_text
+    )
+    answer = sanitize_or_refuse(answer, context_str, force_refusal=off_topic)
 
-    if not answer or is_refusal(answer) or is_generic_answer(answer):
-        answer = clean_answer_text(generate_answer(llm_question, nodes, llm))
+    not_found_msg = (
+        "I couldn't find that in Masters' Union program documents. "
+        "Try asking about programs, admissions, courses, fees, faculty, or placements."
+    )
 
-    if not answer or not has_substantive_content(answer) or is_generic_answer(answer):
-        refuse, refusal_msg = should_refuse(
-            question, nodes, scope_text, after_generation=True
+    if off_topic or answer_contains_outside_knowledge(answer, context_str) or (
+        answer_dodges_instead_of_refusing(answer) and not mu_program_question
+    ):
+        return _refusal_response(
+            question,
+            conversation_id,
+            "out_of_scope",
+            start_time,
+            REFUSAL_MESSAGE,
+            nodes,
+            client_id=client_id,
         )
-        if refuse:
-            refusal_type = (
-                "not_found"
-                if refusal_msg and "couldn't find" in refusal_msg.lower()
-                else "out_of_scope"
-            )
+
+    if mu_program_question:
+        if not answer or not has_substantive_content(answer) or is_generic_answer(answer):
             return _refusal_response(
-                question, conversation_id, refusal_type, start_time, refusal_msg, nodes
+                question,
+                conversation_id,
+                "not_found",
+                start_time,
+                not_found_msg,
+                nodes,
+                client_id=client_id,
             )
-        answer = (
-            "I couldn't find clear information about that in the Masters' Union documents I have. "
-            "Try asking in a bit more detail — for example about a specific program, fees, admissions, or placements."
+    elif (
+        is_refusal(answer)
+        or is_not_answered_response(answer)
+        or is_generic_answer(answer)
+        or not answer
+        or not has_substantive_content(answer)
+    ):
+        return _refusal_response(
+            question,
+            conversation_id,
+            "out_of_scope",
+            start_time,
+            REFUSAL_MESSAGE,
+            nodes,
+            client_id=client_id,
         )
 
     sources = list(
@@ -237,11 +321,7 @@ def query_with_sources(
 
     limited_sources = sources[:MAX_SOURCES]
 
-    if conversation_id:
-        conversation_memory.setdefault(conversation_id, []).append(
-            {"question": question, "answer": answer, "timestamp": time.time()}
-        )
-        conversation_memory[conversation_id] = conversation_memory[conversation_id][-10:]
+    _remember_turn(question, answer, conversation_id, client_id)
 
     log_query(
         {

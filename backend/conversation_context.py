@@ -33,10 +33,42 @@ VAGUE_STARTERS = re.compile(
 )
 
 
-def get_history(conversation_memory: dict, conversation_id: Optional[str], limit: int = 3) -> List[dict]:
-    if not conversation_id or conversation_id not in conversation_memory:
-        return []
-    return conversation_memory[conversation_id][-limit:]
+def memory_key(client_id: Optional[str], conversation_id: Optional[str]) -> Optional[str]:
+    if not conversation_id:
+        return None
+    if client_id:
+        return f"{client_id}:{conversation_id}"
+    return conversation_id
+
+
+def get_history(
+    conversation_memory: dict,
+    conversation_id: Optional[str],
+    limit: int = 3,
+    *,
+    client_id: Optional[str] = None,
+    request_history: Optional[List[dict]] = None,
+) -> List[dict]:
+    """Prefer history sent by the client (device-local); fall back to server cache."""
+    if request_history:
+        return [
+            {
+                "question": turn.get("question", ""),
+                "answer": turn.get("answer", ""),
+                "timestamp": turn.get("timestamp", 0),
+            }
+            for turn in request_history[-limit:]
+            if turn.get("question")
+        ]
+
+    key = memory_key(client_id, conversation_id)
+    if key and key in conversation_memory:
+        return conversation_memory[key][-limit:]
+
+    if conversation_id and conversation_id in conversation_memory:
+        return conversation_memory[conversation_id][-limit:]
+
+    return []
 
 
 def extract_topic_hints(text: str, max_terms: int = 12) -> List[str]:
