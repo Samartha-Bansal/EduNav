@@ -188,6 +188,7 @@ def normalize_question(question: str) -> str:
 
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
+    logger.info("Received /ask request")
     normalized_question = normalize_question(request.question)
     try:
         query_engine, llm = await asyncio.to_thread(get_query_engine)
