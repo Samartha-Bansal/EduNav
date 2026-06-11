@@ -88,11 +88,10 @@ async def lifespan(app: FastAPI):
             logger.warning("Startup init deferred: %s", exc)
     else:
         logger.info(
-            "Skipping eager engine load (%s). Port binds immediately; "
-            "models load on first request or in background.",
+            "Skipping eager engine load (%s). Models will load only on the first /ask request.",
             "LOW_MEMORY_MODE" if LOW_MEMORY_MODE else "EAGER_LOAD_ENGINE=false",
         )
-        warmup_task = asyncio.create_task(_init_engine_background())
+        warmup_task = None
     yield
     if warmup_task and not warmup_task.done():
         warmup_task.cancel()
