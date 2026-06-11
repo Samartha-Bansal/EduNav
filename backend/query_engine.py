@@ -12,7 +12,6 @@ from llama_index.core.postprocessor import SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.schema import QueryBundle
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from answer_generator import (
     format_context,
@@ -29,9 +28,16 @@ from conversation_context import (
     memory_key,
     resolve_question,
 )
+from embeddings import get_embed_model
 from llm_factory import create_llm
 from query_classifier import QueryClassifier
 from query_expansion import build_retrieval_query
+from runtime_config import (
+    DEFAULT_RERANK_TOP_N,
+    DEFAULT_TOP_K,
+    ENABLE_RERANK,
+    RERANK_MODEL_NAME,
+)
 from answer_safety import (
     answer_contains_outside_knowledge,
     answer_dodges_instead_of_refusing,
@@ -53,12 +59,8 @@ from topic_guard import (
 load_dotenv()
 load_dotenv(".env.local", override=True)
 
-Settings.embed_model = HuggingFaceEmbedding(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
-
-TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "12"))
-RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "6"))
+TOP_K = int(os.getenv("RETRIEVAL_TOP_K", DEFAULT_TOP_K))
+RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", DEFAULT_RERANK_TOP_N))
 MAX_SOURCES = int(os.getenv("MAX_SOURCES", "5"))
 MAX_HIGHLIGHTED_CHUNKS = int(os.getenv("MAX_HIGHLIGHTED_CHUNKS", "4"))
 
@@ -175,22 +177,27 @@ def log_query(log_data: dict) -> None:
 
 
 def create_query_engine(storage_dir: str = "storage", top_k: int = TOP_K):
+    get_embed_model()
     index = load_persisted_index(storage_dir)
     llm = create_llm()
     Settings.llm = llm
 
     retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
-    reranker = SentenceTransformerRerank(
-        model="cross-encoder/ms-marco-MiniLM-L-6-v2",
-        top_n=RERANK_TOP_N,
-    )
+    postprocessors = []
+    if ENABLE_RERANK:
+        postprocessors.append(
+            SentenceTransformerRerank(
+                model=RERANK_MODEL_NAME,
+                top_n=RERANK_TOP_N,
+            )
+        )
 
     query_engine = RetrieverQueryEngine(
         retriever=retriever,
-        node_postprocessors=[reranker],
+        node_postprocessors=postprocessors,
     )
     query_engine._retriever = retriever
-    query_engine._node_postprocessors = [reranker]
+    query_engine._node_postprocessors = postprocessors
     return query_engine, llm
 
 

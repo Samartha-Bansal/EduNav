@@ -231,7 +231,7 @@ Desktop.ini
 backend/__pycache__/
 backend/cache/
 backend/logs/
-backend/storage/  # Persisted index, can be regenerated
+# storage/ must be committed for Render deploy (pre-built FAISS index)
 backend/data/     # Uploaded documents, if not needed in repo
 
 # Environment files

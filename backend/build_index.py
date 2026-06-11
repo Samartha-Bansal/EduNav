@@ -6,14 +6,10 @@ import shutil
 import faiss
 from llama_index.core import Settings, StorageContext, VectorStoreIndex, load_index_from_storage
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.faiss import FaissVectorStore
 
+from embeddings import get_embed_model
 from ingestion import load_all_documents
-
-Settings.embed_model = HuggingFaceEmbedding(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
 
 EMBED_DIM = 384
 
@@ -30,7 +26,7 @@ def build_and_persist_index(
         raise ValueError("No documents found. Add files to data/ or provide final_rag_input.jsonl")
 
     text_splitter = SentenceSplitter(chunk_size=400, chunk_overlap=80)
-    embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embed_model = get_embed_model()
 
     vector_store = FaissVectorStore(faiss_index=faiss.IndexFlatIP(EMBED_DIM))
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -54,6 +50,7 @@ def load_persisted_index(storage_dir: str = "storage"):
         return load_persisted_index(storage_dir)
 
     try:
+        get_embed_model()
         vector_store = FaissVectorStore.from_persist_dir(persist_dir=storage_dir)
         storage_context = StorageContext.from_defaults(
             vector_store=vector_store,

@@ -1,11 +1,14 @@
 """FastAPI server for EduNavigator RAG."""
 
+import runtime_config  # noqa: F401 — thread/env limits before torch loads
+
 import asyncio
 import json
 import logging
 import os
 import re
 import socket
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from difflib import get_close_matches
@@ -18,6 +21,7 @@ from pydantic import BaseModel
 
 import build_index
 from query_engine import create_query_engine, query_with_sources
+from runtime_config import EAGER_LOAD_ENGINE, LOW_MEMORY_MODE
 
 load_dotenv()
 load_dotenv(".env.local", override=True)
@@ -29,39 +33,86 @@ HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8001"))
 STORAGE_DIR = os.getenv("STORAGE_DIR", "storage")
 
+_engine_lock = threading.Lock()
+
 
 class AppState:
     query_engine = None
     llm = None
     init_error: str | None = None
+    engine_loading: bool = False
 
 
 app_state = AppState()
 
 
 def get_query_engine():
-    if app_state.query_engine is None or app_state.llm is None:
-        app_state.query_engine, app_state.llm = create_query_engine(storage_dir=STORAGE_DIR)
-        app_state.init_error = None
-    return app_state.query_engine, app_state.llm
+    if app_state.query_engine is not None and app_state.llm is not None:
+        return app_state.query_engine, app_state.llm
+
+    with _engine_lock:
+        if app_state.query_engine is not None and app_state.llm is not None:
+            return app_state.query_engine, app_state.llm
+        app_state.engine_loading = True
+        try:
+            app_state.query_engine, app_state.llm = create_query_engine(
+                storage_dir=STORAGE_DIR
+            )
+            app_state.init_error = None
+            return app_state.query_engine, app_state.llm
+        except Exception as exc:
+            app_state.init_error = str(exc)
+            raise
+        finally:
+            app_state.engine_loading = False
+
+
+async def _init_engine_background():
+    try:
+        await asyncio.to_thread(get_query_engine)
+        logger.info("Query engine ready (background init)")
+    except Exception as exc:
+        app_state.init_error = str(exc)
+        logger.warning("Engine init failed: %s", exc)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        get_query_engine()
-        logger.info("Query engine ready")
-    except Exception as exc:
-        app_state.init_error = str(exc)
-        logger.warning("Startup init deferred: %s", exc)
+    warmup_task = None
+    if EAGER_LOAD_ENGINE:
+        try:
+            await asyncio.to_thread(get_query_engine)
+            logger.info("Query engine ready (eager init)")
+        except Exception as exc:
+            app_state.init_error = str(exc)
+            logger.warning("Startup init deferred: %s", exc)
+    else:
+        logger.info(
+            "Skipping eager engine load (%s). Port binds immediately; "
+            "models load on first request or in background.",
+            "LOW_MEMORY_MODE" if LOW_MEMORY_MODE else "EAGER_LOAD_ENGINE=false",
+        )
+        warmup_task = asyncio.create_task(_init_engine_background())
     yield
+    if warmup_task and not warmup_task.done():
+        warmup_task.cancel()
 
 
-app = FastAPI(title="EduNavigator Course Assistant", version="4.0.1", lifespan=lifespan)
+def _cors_origins() -> list[str]:
+    raw = os.getenv("ALLOW_ORIGINS", "")
+    if raw.strip():
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
+app = FastAPI(title="EduNavigator Course Assistant", version="4.0.2", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -140,7 +191,7 @@ def normalize_question(question: str) -> str:
 async def ask_question(request: QuestionRequest):
     normalized_question = normalize_question(request.question)
     try:
-        query_engine, llm = get_query_engine()
+        query_engine, llm = await asyncio.to_thread(get_query_engine)
         history = (
             [turn.model_dump() for turn in request.history] if request.history else None
         )
@@ -189,11 +240,23 @@ async def upload_documents(files: list[UploadFile] = File(...)):
 async def health_check():
     index_ready = Path(STORAGE_DIR).is_dir() and any(Path(STORAGE_DIR).iterdir())
     llm_configured = bool(os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY"))
+    engine_ready = app_state.query_engine is not None
+    # Always 200 so Render detects the open port; status reflects readiness.
+    if engine_ready and index_ready and llm_configured:
+        status = "healthy"
+    elif app_state.engine_loading:
+        status = "starting"
+    elif app_state.init_error:
+        status = "error"
+    else:
+        status = "degraded"
     return {
-        "status": "healthy" if index_ready and llm_configured else "degraded",
+        "status": status,
         "index_ready": index_ready,
         "llm_configured": llm_configured,
-        "engine_ready": app_state.query_engine is not None,
+        "engine_ready": engine_ready,
+        "engine_loading": app_state.engine_loading,
+        "low_memory_mode": LOW_MEMORY_MODE,
         "init_error": app_state.init_error,
         "timestamp": datetime.now().isoformat(),
     }
