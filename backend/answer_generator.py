@@ -1,30 +1,36 @@
-"""Strict answer synthesis — single LLM call; no outside knowledge."""
+"""Strict answer synthesis — grounded summaries only; never output scope boilerplate."""
 
 import re
 
-from topic_guard import REFUSAL_MESSAGE
-
 STRICT_SYSTEM = """You are the Masters' Union Program Help assistant.
 
-Answer using ONLY the document excerpts below.
+Answer using ONLY the document excerpts below about Masters' Union (programs, people, campus, placements).
 
-WHEN TO ANSWER (write 2–4 short paragraphs):
-- Questions about Masters' Union courses, programs, curriculum, electives, modules, fees, admissions, faculty, placements, or campus life.
-- Phrases like "your courses" or "what you offer" mean Masters' Union — summarize program/course facts from the excerpts even if they use different wording (e.g. electives, curriculum, PGP TBM, UG TBM).
+RULES:
+- Write 2–4 short paragraphs of clear prose when excerpts contain relevant facts.
+- Questions about founders, faculty, courses, fees, admissions, or placements ARE about Masters' Union — answer from excerpts.
+- "MU", "M.U.", "Master Union", "Masters Union", or misspellings (maters union) mean this school.
+- If excerpts truly lack the answer, say ONLY: "I could not find that in Masters' Union program documents."
 
-WHEN TO REFUSE:
-- Only if the question is clearly NOT about Masters' Union (history, science, other exams, general trivia) AND excerpts have nothing relevant.
-- In that case say in one sentence: "I could not find that in Masters' Union program documents."
-
-FORBIDDEN:
-- Outside knowledge (dates, history, science, math not in excerpts)
-- "The excerpts do not mention…", "however they discuss…", "might be a distraction"
-- Refusing a Masters' Union program question when excerpts describe courses or curriculum
-- "visit the website", "contact admissions", "unfortunately"
+NEVER output:
+- A message saying you "can only answer questions about Masters' Union" (the user is already on the MU site).
+- Outside knowledge not in excerpts.
+- "The excerpts do not mention…" followed by unrelated MU marketing.
 """
 
-MU_SUMMARY_PROMPT = """Summarize Masters' Union course and program information from the excerpts below to answer the question.
-Use 2–4 short paragraphs. Only use facts from the excerpts.
+FOUNDER_PROMPT = """Using ONLY the excerpts below, answer the question about Masters' Union leadership/founder.
+Focus on Pratham Mittal or whoever the excerpts name as founder or founding partner.
+Write 2–3 paragraphs. If founder details are missing, say you could not find that in Masters' Union program documents.
+
+Excerpts:
+{context}
+
+Question: {question}
+
+Answer:"""
+
+MU_SUMMARY_PROMPT = """Summarize information from the excerpts below to answer the question about Masters' Union.
+Use 2–4 short paragraphs. Only facts from excerpts.
 
 Excerpts:
 {context}
@@ -54,6 +60,8 @@ GENERIC_PATTERNS = [
     r"\bmight be a distraction\b",
     r"\bancient civilization\b",
     r"\b\d{1,4}\s*(?:bce|ce)\b",
+    r"\bi can only answer questions about masters",
+    r"\bprogram help\*\* assistant\b",
 ]
 
 NOT_ANSWERED_PATTERNS = [
@@ -65,6 +73,8 @@ NOT_ANSWERED_PATTERNS = [
     r"no information about",
     r"not possible to determine",
 ]
+
+FOUNDER_RE = re.compile(r"\b(founder|co-?founder|founders|founding)\b", re.I)
 
 
 def format_context(nodes: list, max_chars_per_node: int = 1500) -> str:
@@ -85,6 +95,12 @@ def is_generic_answer(answer: str) -> bool:
 def is_not_answered_response(answer: str) -> bool:
     lower = answer.lower()
     return any(re.search(p, lower) for p in NOT_ANSWERED_PATTERNS)
+
+
+def is_scope_refusal_answer(answer: str) -> bool:
+    from answer_validator import is_scope_refusal
+
+    return is_scope_refusal(answer)
 
 
 def is_bullet_heavy(text: str) -> bool:
@@ -124,9 +140,13 @@ def finalize_format(answer: str) -> str:
     return answer
 
 
-def _looks_like_scope_refusal(text: str) -> bool:
-    lower = (text or "").lower()
-    return "i can only answer questions about masters" in lower or "program help** assistant" in lower
+def _bad_answer(answer: str) -> bool:
+    return (
+        not answer
+        or is_scope_refusal_answer(answer)
+        or is_not_answered_response(answer)
+        or is_generic_answer(answer)
+    )
 
 
 def generate_answer(question: str, nodes: list, llm, *, mu_program_question: bool = False) -> str:
@@ -137,15 +157,20 @@ def generate_answer(question: str, nodes: list, llm, *, mu_program_question: boo
     prompt = STRICT_PROMPT.format(system=STRICT_SYSTEM, context=context, question=question)
     answer = sanitize_answer(llm.complete(prompt).text)
 
-    if mu_program_question and (
-        _looks_like_scope_refusal(answer) or is_not_answered_response(answer) or not answer
-    ):
+    if _bad_answer(answer) and mu_program_question:
+        if FOUNDER_RE.search(question):
+            retry_prompt = FOUNDER_PROMPT.format(context=context, question=question)
+        else:
+            retry_prompt = MU_SUMMARY_PROMPT.format(context=context, question=question)
+        retry = sanitize_answer(llm.complete(retry_prompt).text)
+        if retry and not is_scope_refusal_answer(retry):
+            answer = retry
+
+    if _bad_answer(answer) and mu_program_question and not FOUNDER_RE.search(question):
         retry = sanitize_answer(
-            llm.complete(
-                MU_SUMMARY_PROMPT.format(context=context, question=question)
-            ).text
+            llm.complete(FOUNDER_PROMPT.format(context=context, question=question)).text
         )
-        if retry and not _looks_like_scope_refusal(retry):
+        if retry and not is_scope_refusal_answer(retry):
             answer = retry
 
     return finalize_format(answer)

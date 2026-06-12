@@ -18,8 +18,9 @@ from answer_generator import (
     generate_answer,
     is_generic_answer,
     is_not_answered_response,
+    is_scope_refusal_answer,
 )
-from answer_validator import has_substantive_content, is_refusal
+from answer_validator import has_substantive_content, is_refusal, is_scope_refusal
 from build_index import load_persisted_index
 from conversation_context import (
     combined_scope_text,
@@ -257,6 +258,7 @@ def query_with_sources(
     mu_program_question = (
         is_assistant_scoped_question(question)
         or is_program_related(question)
+        or mentions_masters_union(question)
         or mentions_masters_union(scope_text)
     )
     answer = clean_answer_text(
@@ -285,8 +287,25 @@ def query_with_sources(
             client_id=client_id,
         )
 
+    # Scope boilerplate must never ship with retrieved sources
+    if is_scope_refusal(answer) or is_scope_refusal_answer(answer):
+        return _refusal_response(
+            question,
+            conversation_id,
+            "out_of_scope",
+            start_time,
+            REFUSAL_MESSAGE,
+            nodes,
+            client_id=client_id,
+        )
+
     if mu_program_question:
-        if not answer or not has_substantive_content(answer) or is_generic_answer(answer):
+        if (
+            not answer
+            or not has_substantive_content(answer)
+            or is_generic_answer(answer)
+            or is_not_answered_response(answer)
+        ):
             return _refusal_response(
                 question,
                 conversation_id,

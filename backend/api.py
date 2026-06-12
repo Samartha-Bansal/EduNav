@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import build_index
+from mu_text import normalize_mu_aliases
 from query_engine import create_query_engine, query_with_sources
 from runtime_config import EAGER_LOAD_ENGINE, LOW_MEMORY_MODE
 
@@ -157,7 +158,7 @@ class AnswerResponse(BaseModel):
 COMMON_KEYWORDS = [
     "founder", "global", "immersion", "placement", "admission", "application",
     "fee", "tuition", "faculty", "entrepreneurship", "startup", "campus",
-    "program", "course", "career", "salary", "location",
+    "program", "course", "career", "salary", "location", "masters", "union",
 ]
 
 SPELLING_REPLACEMENTS = {
@@ -175,6 +176,7 @@ SPELLING_REPLACEMENTS = {
 
 
 def normalize_question(question: str) -> str:
+    question = normalize_mu_aliases(question)
     words = re.findall(r"\w+", question.lower())
     normalized = []
     for word in words:

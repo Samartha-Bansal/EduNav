@@ -3,6 +3,8 @@
 import re
 from typing import List, Optional
 
+from mu_text import normalize_mu_aliases
+
 MU_SCOPE = "Masters Union"
 
 # Follow-up / deictic cues — need prior turn to resolve
@@ -174,8 +176,8 @@ def resolve_question(question: str, history: List[dict]) -> str:
 
 def combined_scope_text(question: str, history: List[dict]) -> str:
     """Text used for off-topic checks — includes recent conversation."""
-    parts = [question]
+    parts = [normalize_mu_aliases(question)]
     for turn in history[-2:]:
-        parts.append(turn.get("question") or "")
-        parts.append((turn.get("answer") or "")[:400])
+        parts.append(normalize_mu_aliases(turn.get("question") or ""))
+        parts.append(normalize_mu_aliases((turn.get("answer") or "")[:400]))
     return "\n".join(p for p in parts if p.strip())

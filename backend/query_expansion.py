@@ -2,7 +2,9 @@
 
 import re
 
-MU_ANCHOR = "Masters Union"
+from mu_text import MU_CANONICAL, has_mu_reference, normalize_mu_aliases
+
+MU_ANCHOR = MU_CANONICAL
 
 TOPIC_EXPANSIONS = [
     (
@@ -52,7 +54,7 @@ def build_retrieval_query(
     Expand question for vector search. Implicitly scoped to Masters' Union
     (users are on the MU help site — they should not need to repeat the name).
     """
-    q = question.strip()
+    q = normalize_mu_aliases(question.strip())
     ql = q.lower()
     extras: list[str] = []
 
@@ -66,8 +68,8 @@ def build_retrieval_query(
     if history_hints:
         extras.extend(history_hints[:6])
 
-    # Always anchor retrieval to MU unless already explicit
-    if not re.search(r"masters['\u2019\s]*union|mastersunion|\bpgp[\s-]*tbm\b|\bug[\s-]*tbm\b", ql):
+    # Always anchor retrieval to Masters' Union unless already explicit (incl. MU shorthand)
+    if not has_mu_reference(q):
         extras.insert(0, MU_ANCHOR)
 
     if re.search(r"\b(?:he|she|him|her|they|it|that|this)\b", q, re.I) and history_hints:

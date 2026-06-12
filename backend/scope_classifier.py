@@ -72,11 +72,14 @@ STOP_TERMS = frozenset(
 # User is talking to the MU assistant about "your" offerings — always in scope
 ASSISTANT_SCOPE_RE = re.compile(
     r"(?:"
-    r"\b(?:tell|explain|describe)\s+(?:me\s+)?about\s+(?:your|the)\b"
+    r"\b(?:tell|explain|describe)\s+(?:me\s+)?about\s+(?:your|the|mu)\b"
     r"|\bwhat\s+(?:are\s+)?(?:your|the)\s+"
+    r"|\bwhat\s+(?:is|are)\s+mu\b"
     r"|\bwhat\s+(?:do\s+)?you\s+(?:offer|teach|have|provide)\b"
     r"|\b(?:your|the)\s+(?:courses?|programs?|programmes?|fees?|admissions?|"
     r"placements?|faculty|campus|curriculum|offerings?)\b"
+    r"|\bmu\s+(?:fees?|courses?|programs?|programmes?|admissions?|placements?|"
+    r"faculty|campus|curriculum|founder|founders?)\b"
     r")",
     re.IGNORECASE,
 )

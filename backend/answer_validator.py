@@ -14,7 +14,19 @@ def is_refusal(answer: str) -> bool:
     if not answer or not answer.strip():
         return True
     lower = answer.lower().strip()
-    return any(phrase in lower for phrase in NOT_FOUND_PHRASES)
+    return any(phrase in lower for phrase in NOT_FOUND_PHRASES) or is_scope_refusal(answer)
+
+
+def is_scope_refusal(answer: str) -> bool:
+    """Canned out-of-scope message — must never be returned with retrieved sources."""
+    if not answer:
+        return False
+    lower = answer.lower()
+    return (
+        "program help** assistant" in lower
+        or "i can only answer questions about masters" in lower
+        or "please ask something related to masters" in lower
+    )
 
 
 def has_substantive_content(answer: str, min_words: int = 12) -> bool:

@@ -33,11 +33,7 @@ OFF_TOPIC_PATTERNS = [
     r"\bcompare\b.+\b(harvard|stanford|mit)\b(?!.*masters)",
 ]
 
-MU_MARKERS = re.compile(
-    r"masters['\u2019\s]*union|mastersunion|master['\u2019]s\s+union|"
-    r"\bpgp[\s-]*tbm\b|\bug[\s-]*tbm\b|\bug[\s-]*psm\b|\btbm\b|\bmubf\b",
-    re.IGNORECASE,
-)
+from mu_text import MU_MARKERS, mentions_masters_union, normalize_mu_aliases
 
 PROGRAM_TOPIC_KEYWORDS = re.compile(
     r"\b(admissions?|admit|apply|application|eligib|requirement|deadline|"
@@ -73,10 +69,6 @@ GENERAL_KNOWLEDGE_PATTERNS = [
     r"\b(neet|jee|iit[\s-]?jee|upsc|gate\s+exam|clat|aiims|cbse|icse)\b",
     r"\bquantum(?:\s+theory|\s+mechanics)?\b",
 ]
-
-
-def mentions_masters_union(text: str) -> bool:
-    return bool(MU_MARKERS.search(text))
 
 
 def is_program_related(text: str) -> bool:
@@ -121,8 +113,8 @@ def is_clearly_off_topic(question: str, conversation_context: str = "") -> bool:
     Only block obvious non-MU requests. Vague questions default to in-scope.
     conversation_context: recent Q&A — used so follow-ups inherit topic.
     """
-    combined = f"{question}\n{conversation_context}".lower().strip()
-    q = question.lower().strip()
+    combined = normalize_mu_aliases(f"{question}\n{conversation_context}").lower().strip()
+    q = normalize_mu_aliases(question).lower().strip()
 
     if len(q) < 2:
         return True
