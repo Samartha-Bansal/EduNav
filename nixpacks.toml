@@ -1,0 +1,3 @@
+[variables]
+NIXPACKS_BUILD_CMD = "cd backend && pip install -r requirements.txt"
+NIXPACKS_START_CMD = "cd backend && uvicorn api:app --host 0.0.0.0 --port $PORT"
