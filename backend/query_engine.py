@@ -49,7 +49,7 @@ from scope_classifier import (
     is_assistant_scoped_question,
     is_world_knowledge_question,
 )
-from topic_guard import is_program_related, mentions_masters_union
+from topic_guard import is_implicit_mu_question, is_program_related, mentions_masters_union
 from topic_guard import (
     REFUSAL_MESSAGE,
     is_clearly_off_topic,
@@ -258,6 +258,7 @@ def query_with_sources(
     mu_program_question = (
         is_assistant_scoped_question(question)
         or is_program_related(question)
+        or is_implicit_mu_question(question, scope_text)
         or mentions_masters_union(question)
         or mentions_masters_union(scope_text)
     )

@@ -7,6 +7,7 @@ from topic_guard import (
     REFUSAL_MESSAGE,
     is_clearly_off_topic,
     is_gibberish_or_spam,
+    is_implicit_mu_question,
     is_program_related,
     mentions_masters_union,
 )
@@ -77,9 +78,11 @@ ASSISTANT_SCOPE_RE = re.compile(
     r"|\bwhat\s+(?:is|are)\s+mu\b"
     r"|\bwhat\s+(?:do\s+)?you\s+(?:offer|teach|have|provide)\b"
     r"|\b(?:your|the)\s+(?:courses?|programs?|programmes?|fees?|admissions?|"
-    r"placements?|faculty|campus|curriculum|offerings?)\b"
+    r"placements?|facult(?:y|ies)|campus|curriculum|offerings?|companies?|recruiters?)\b"
     r"|\bmu\s+(?:fees?|courses?|programs?|programmes?|admissions?|placements?|"
-    r"faculty|campus|curriculum|founder|founders?)\b"
+    r"facult(?:y|ies)|campus|curriculum|founder|founders?|location|address)\b"
+    r"|\b(?:where|located|situated|address)\b.+\b(?:here|campus|mu|masters)\b"
+    r"|\b(?:companies?|recruiters?)\b.+\b(?:visit|recruit|hire|come)\b"
     r")",
     re.IGNORECASE,
 )
@@ -90,8 +93,12 @@ TERM_ALIASES = {
     "programmes": ("program", "programme", "pgp", "tbm"),
     "fees": ("fee", "tuition", "cost", "scholarship"),
     "admissions": ("admission", "apply", "eligibility", "deadline"),
-    "placements": ("placement", "salary", "career", "internship"),
-    "faculty": ("professor", "director", "dean", "staff", "roster"),
+    "placements": ("placement", "salary", "career", "internship", "recruiter", "company"),
+    "companies": ("company", "recruiter", "employer", "firm", "visit", "hiring"),
+    "faculty": ("professor", "director", "dean", "staff", "roster", "faculties", "instructor"),
+    "faculties": ("faculty", "professor", "director", "dean", "staff", "roster", "instructor"),
+    "located": ("location", "address", "situated", "campus", "gurugram", "delhi"),
+    "situated": ("location", "address", "located", "campus", "gurugram", "delhi"),
 }
 
 
@@ -168,6 +175,9 @@ def is_world_knowledge_question(question: str, conversation_context: str = "") -
     if is_assistant_scoped_question(question) or is_program_related(question):
         return False
 
+    if is_implicit_mu_question(question, conversation_context):
+        return False
+
     q = question.lower().strip()
 
     if EXTERNAL_EXAM_RE.search(q):
@@ -240,10 +250,22 @@ def retrieval_supports_question(
     if not (mentions_masters_union(context) or is_program_related(context)):
         return False
 
-    # Program / assistant-scoped questions with good MU retrieval — answer
-    if (is_assistant_scoped_question(question) or is_program_related(question)) and (
-        not is_weak_retrieval(nodes)
-    ):
+    mu_question = (
+        is_assistant_scoped_question(question)
+        or is_program_related(question)
+        or is_implicit_mu_question(question, conversation_context)
+        or is_program_related(combined)
+    )
+
+    # Strong MU retrieval — answer program-related / implicit MU questions
+    if mu_question and not is_weak_retrieval(nodes):
+        return True
+
+    # Good MU chunks retrieved on the dedicated MU bot — don't hard-refuse
+    if not is_weak_retrieval(nodes):
+        return True
+
+    if mu_question:
         return True
 
     focus = extract_focus_terms(question)

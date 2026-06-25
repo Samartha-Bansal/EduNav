@@ -12,7 +12,10 @@ TOPIC_EXPANSIONS = [
         ["Pratham Mittal", "Masters Union founder", "founding team", "leadership"],
     ),
     (
-        re.compile(r"\b(faculty|staff|director|professor|teacher|roster|mahak|dean)\b", re.I),
+        re.compile(
+            r"\b(facult(?:y|ies)|staff|director|professor|instructor|teacher|roster|mahak|dean|names?)\b",
+            re.I,
+        ),
         ["faculty", "director", "roster", "Mahak Garg", "Masters Union leadership"],
     ),
     (
@@ -20,8 +23,11 @@ TOPIC_EXPANSIONS = [
         ["fees", "tuition", "scholarship", "PGP TBM", "UG TBM"],
     ),
     (
-        re.compile(r"\b(placement|salary|career|internship|recruit|package)\b", re.I),
-        ["placement", "salary", "career outcomes", "cohort"],
+        re.compile(
+            r"\b(placement|salary|career|internship|recruit|package|compan(?:y|ies)|recruiter|visit(?:ing|s)?|hiring)\b",
+            re.I,
+        ),
+        ["placement", "salary", "career outcomes", "recruiters", "companies visited", "cohort"],
     ),
     (
         re.compile(r"\b(admission|admit|apply|application|eligib|deadline|requirement)\b", re.I),
@@ -35,8 +41,11 @@ TOPIC_EXPANSIONS = [
         ["curriculum", "courses", "programme structure", "PGP TBM", "UG TBM"],
     ),
     (
-        re.compile(r"\b(campus|hostel|immersion|bharat|fellowship|cohort)\b", re.I),
-        ["campus", "immersion", "student life", "Masters Union"],
+        re.compile(
+            r"\b(campus|hostel|immersion|bharat|fellowship|cohort|located|situated|location|address|where)\b",
+            re.I,
+        ),
+        ["campus", "location", "Gurugram", "address", "immersion", "student life", "Masters Union"],
     ),
     (
         re.compile(r"\b(board|trustee|govern|chair)\b", re.I),
@@ -72,7 +81,7 @@ def build_retrieval_query(
     if not has_mu_reference(q):
         extras.insert(0, MU_ANCHOR)
 
-    if re.search(r"\b(?:he|she|him|her|they|it|that|this)\b", q, re.I) and history_hints:
+    if re.search(r"\b(?:he|she|him|her|they|it|that|this|here|there)\b", q, re.I) and history_hints:
         extras.extend(history_hints[:8])
 
     if not extras:

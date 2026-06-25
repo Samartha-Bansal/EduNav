@@ -39,12 +39,24 @@ PROGRAM_TOPIC_KEYWORDS = re.compile(
     r"\b(admissions?|admit|apply|application|eligib|requirement|deadline|"
     r"courses?|curriculum|programmes?|programs?|syllabus|modules?|electives?|degrees?|"
     r"fees?|tuition|costs?|scholarships?|financial|"
-    r"faculty|professors?|directors?|staff|roster|dean|"
-    r"placements?|salaries?|careers?|internships?|recruits?|"
+    r"facult(?:y|ies)|professors?|instructors?|teachers?|directors?|staff|roster|dean|"
+    r"placements?|salaries?|careers?|internships?|recruits?|recruiters?|"
+    r"compan(?:y|ies)|hiring|visits?|visiting|"
     r"campus|hostels?|immersions?|cohorts?|class\s+of|"
+    r"located|situated|location|address|whereabouts|"
     r"founders?|board|mba|undergraduates?|postgraduates?|"
     r"students?|learn|skills?|technologies?|business|fellowships?|incubat|startups?|"
-    r"challenges?|reports?|brochures?|batches?|years?)\b",
+    r"challenges?|reports?|brochures?|batches?|years?|names?)\b",
+    re.IGNORECASE,
+)
+
+# On the MU assistant, deictic / follow-up phrasing still refers to Masters' Union
+IMPLICIT_MU_RE = re.compile(
+    r"\b("
+    r"here|there|this|your|our|"
+    r"where\s+(?:is|are|was|were)|"
+    r"located|situated|address|location|campus"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -73,6 +85,14 @@ GENERAL_KNOWLEDGE_PATTERNS = [
 
 def is_program_related(text: str) -> bool:
     return bool(PROGRAM_TOPIC_KEYWORDS.search(text))
+
+
+def is_implicit_mu_question(question: str, conversation_context: str = "") -> bool:
+    """Vague or deictic questions on the MU bot (e.g. 'companies that visit here')."""
+    combined = f"{question}\n{conversation_context}"
+    if mentions_masters_union(combined) or is_program_related(combined):
+        return True
+    return bool(IMPLICIT_MU_RE.search(question))
 
 
 def is_general_knowledge_question(question: str, conversation_context: str = "") -> bool:
@@ -130,8 +150,12 @@ def is_clearly_off_topic(question: str, conversation_context: str = "") -> bool:
 
     # "syllabus" alone is in-scope; "syllabus for NEET" is not — world_knowledge handles that above
 
-    # Explicit MU or program vocabulary anywhere in thread → in scope
-    if mentions_masters_union(combined) or is_program_related(combined):
+    # Explicit MU, program vocabulary, or deictic follow-ups → in scope
+    if (
+        mentions_masters_union(combined)
+        or is_program_related(combined)
+        or is_implicit_mu_question(question, conversation_context)
+    ):
         for pattern in OFF_TOPIC_PATTERNS:
             if re.search(pattern, q, re.IGNORECASE):
                 return True
