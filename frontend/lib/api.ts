@@ -79,7 +79,10 @@ export async function sendMessage(
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
-  const response = await apiFetch('/health')
+  const response = await fetch(`${API_URL}/health`, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(15_000),
+  })
   if (!response.ok) {
     throw new Error('Service unavailable')
   }
